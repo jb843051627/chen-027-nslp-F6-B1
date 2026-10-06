@@ -7,9 +7,12 @@ import com.fc.v2.model.custom.TaskDispatchResult;
 /**
  * 复测与巡查安排单夜间走表 Service接口（dispatch-job 形状：夜里走一趟，无增删改查入口）。
  *
- * 触发把手只有 {@link #runOnce(Date)} 这一个，不留第二个。原先那一套
- * （{@link ITNslpTaskItemService}）原地不动；要「一趟只办一个区册」之类的变体，
- * 请在本接口之外另立名目去担，不拿这条本体开刀。
+ * 触发把手只有 {@link #runOnce(Date)} 这一个，不留第二个：页面由
+ * {@code NslpTaskItemDispatchController#run()} 唤起，夜里由 Quartz 作业
+ * {@code nslpDispatchTask.runNightly()} 唤起，两处进的是同一套口径、同一个实现。
+ * 早先那一套 scheduling-job 形状的老实现（窗口外也动单、空单越界、已处理重复发、
+ * 恰好到点判否、单条异常整批中断）已经整根撤掉，要做变体请在本接口之外另立名目，
+ * 不拿这条本体开刀。
  *
  * @author fuce
  * @date 2026-10-06
