@@ -19,6 +19,9 @@ import java.util.Set;
  *   <li>那一截开不开：只认 02:00 到 05:00（含 02:00 那一刻，到 05:00 即收手）。</li>
  *   <li>哪些行算届期：这一行届期那一刻走到本次这一刻就算到，恰好等于这一刻的也算；
  *       挑单与回写同用这一条取法。</li>
+ *   <li>哪些行算还搁着：情形格显式落「搁着」、或这一格空着，都算——存量条目由老系统
+ *       搬来时这一格常不填（列默认 NULL），空＝从没办过，与显式落搁着一条待遇；
+ *       已发出、发不成的都不再碰。这一取舍只此一处定死，挑单与两处落记号同用。</li>
  *   <li>可提前几日：只看本行自己那一格，零头不算、法定节假日不算、停办日不算；
  *       那一格空着就当不提前。</li>
  *   <li>一趟至多派几行：500，装满即止，够不着的行什么也不标，照旧搁着等下一趟。</li>
@@ -34,7 +37,7 @@ public final class TaskDispatchRules {
     /** 走表窗口止（不含）：05:00，过了立刻收手 */
     public static final int WIN_TO = 5;
 
-    /** 条目情形：搁着 */
+    /** 条目情形：搁着。老系统搬进来的存量条目这一格常空着（列默认 NULL），空＝从没办过＝按搁着 */
     public static final int STATUS_WAIT = 0;
     /** 条目情形：已发出 */
     public static final int STATUS_DONE = 1;
@@ -139,12 +142,21 @@ public final class TaskDispatchRules {
     }
 
     /**
-     * 这一行本趟挑不挑得中：只挑还搁着的（已发出的、发不成的都不再碰）；
+     * 这一行还搁着没有：只认「搁着」（{@link #STATUS_WAIT}）这一种。情形格空着也按搁着——
+     * 存量条目由老系统搬来时这一格常不填，空＝从没办过，与显式落 0 一样在等夜里走表。
+     * 已发出、发不成、填了旁的码，都不再碰。
+     */
+    public static boolean isWaiting(Integer status) {
+        return status == null || status.intValue() == STATUS_WAIT;
+    }
+
+    /**
+     * 这一行本趟挑不挑得中：只挑还搁着的（情形格空着的存量行也收；已发出的、发不成的都不再碰）；
      * 删除标记空着当正常；届不届期照 {@link #effectiveDueAt} 与 {@link #isDue} 这一条取法。
      */
     public static boolean pickable(Integer status, Integer delFlag, Date dueAt,
                                    BigDecimal amount, Date at) {
-        if (status == null || status.intValue() != STATUS_WAIT) {
+        if (!isWaiting(status)) {
             return false;
         }
         if (delFlag != null && delFlag.intValue() == 1) {

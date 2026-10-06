@@ -60,6 +60,7 @@ public class TNslpTaskItemDispatchServiceImplTest {
 
     private static final Pattern CLAUSE = Pattern.compile(
             "(\\w+)\\s*(<=|>=|=|<|>)\\s*#\\{ew\\.paramNameValuePairs\\.(\\w+)}");
+    private static final Pattern IS_NULL = Pattern.compile("(\\w+)\\s+IS\\s+NULL");
     private static final Pattern SET_CLAUSE = Pattern.compile(
             "(\\w+)=#\\{ew\\.paramNameValuePairs\\.(\\w+)}");
 
@@ -103,6 +104,17 @@ public class TNslpTaskItemDispatchServiceImplTest {
         return out;
     }
 
+    /** 出现在「列 IS NULL」里的列：这些列与同组的等值条件按 OR 相就（空值也算匹配） */
+    private static Set<String> nullColumns(AbstractWrapper<?, ?, ?> w) {
+        Set<String> out = new HashSet<String>();
+        String seg = w.getSqlSegment() == null ? "" : w.getSqlSegment();
+        Matcher m = IS_NULL.matcher(seg);
+        while (m.find()) {
+            out.add(m.group(1));
+        }
+        return out;
+    }
+
     private static Map<String, Object> setValues(UpdateWrapper<?> uw) {
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         Map<String, Object> params = uw.getParamNameValuePairs();
@@ -114,7 +126,7 @@ public class TNslpTaskItemDispatchServiceImplTest {
         return out;
     }
 
-    private boolean itemMatches(TNslpTaskItem r, List<String[]> cs) {
+    private boolean itemMatches(TNslpTaskItem r, List<String[]> cs, Set<String> nullCols) {
         for (String[] c : cs) {
             Object v;
             switch (c[0]) {
@@ -122,6 +134,10 @@ public class TNslpTaskItemDispatchServiceImplTest {
                 case "status": v = r.getStatus(); break;
                 case "del_flag": v = r.getDelFlag(); break;
                 default: v = null;
+            }
+            // 同组「列=值 OR 列 IS NULL」：情形格空着的存量行也算命中（仍搁着）
+            if (nullCols.contains(c[0]) && v == null) {
+                continue;
             }
             if (!eq(v, c[2])) {
                 return false;
@@ -185,10 +201,12 @@ public class TNslpTaskItemDispatchServiceImplTest {
         wallClockTicks("2026-10-06 03:00:00");
 
         when(itemMapper.selectList(any())).thenAnswer(inv -> {
-            List<String[]> cs = clauses(inv.getArgument(0));
+            com.baomidou.mybatisplus.core.conditions.AbstractWrapper<?, ?, ?> w = inv.getArgument(0);
+            List<String[]> cs = clauses(w);
+            Set<String> nullCols = nullColumns(w);
             List<TNslpTaskItem> out = new ArrayList<TNslpTaskItem>();
             for (TNslpTaskItem r : store) {
-                if (itemMatches(r, cs)) {
+                if (itemMatches(r, cs, nullCols)) {
                     out.add(r);
                 }
             }
@@ -197,11 +215,12 @@ public class TNslpTaskItemDispatchServiceImplTest {
         when(itemMapper.update(any(), any())).thenAnswer(inv -> {
             UpdateWrapper<?> uw = inv.getArgument(1);
             List<String[]> cs = clauses(uw);
+            Set<String> nullCols = nullColumns(uw);
             Map<String, Object> sets = setValues(uw);
             boolean sendMark = Integer.valueOf(TaskDispatchRules.STATUS_DONE).equals(sets.get("status"));
             int n = 0;
             for (TNslpTaskItem r : store) {
-                if (!itemMatches(r, cs)) {
+                if (!itemMatches(r, cs, nullCols)) {
                     continue;
                 }
                 if (sendMark && stealIds.contains(r.getId())) {
@@ -474,6 +493,53 @@ public class TNslpTaskItemDispatchServiceImplTest {
         assertEquals(2, r.getPicked());
         assertEquals(2, r.getSent());
         assertEquals(1, find(1L).getStatus().intValue());
+        assertEquals(1, find(2L).getStatus().intValue());
+    }
+
+    @Test
+    public void blankStatusLegacyRow_isPickedAndSent() {
+        // 老系统搬来、情形格空着（列默认 NULL）、恰好今天届期的复测条目：照发，不能漏
+        TNslpTaskItem legacy = row(1L, "2026-10-06 03:00:00", null, "岗甲", 0);
+        legacy.setStatus(null);
+        store.add(legacy);
+        TaskDispatchResult r = service.runOnce(d("2026-10-06 03:00:00"));
+        assertEquals(1, r.getPicked());
+        assertEquals(1, r.getSent());
+        // 发成后情形落成已发出（不再是空），两处记号同回落下
+        assertEquals(1, find(1L).getStatus().intValue());
+        assertNotNull(find(1L).getContent());
+    }
+
+    @Test
+    public void blankStatusLegacyRow_sentOnlyOnce_isIdempotent() {
+        // 空情形老行发成一回后情形变已发出，第二趟（夜间再触发／别的把手照同一处）不再碰
+        TNslpTaskItem legacy = row(1L, "2026-10-01 00:00:00", null, "岗甲", 0);
+        legacy.setStatus(null);
+        store.add(legacy);
+        TaskDispatchResult first = service.runOnce(d("2026-10-06 03:00:00"));
+        assertEquals(1, first.getSent());
+        String contentAfterFirst = find(1L).getContent();
+        TaskDispatchResult second = service.runOnce(d("2026-10-06 03:20:00"));
+        assertEquals(0, second.getPicked());
+        assertEquals(0, second.getSent());
+        assertEquals(contentAfterFirst, find(1L).getContent());
+        assertEquals(1, find(1L).getStatus().intValue());
+    }
+
+    @Test
+    public void blankStatusLegacyRow_withoutRecipient_markedFailed() {
+        // 空情形老行没落着人名：标本行发不成（情形从空落成发不成），不越界、不连累旁行
+        TNslpTaskItem legacy = row(1L, "2026-10-01 00:00:00", null, "  ", 0);
+        legacy.setStatus(null);
+        TNslpTaskItem fresh = row(2L, "2026-10-01 01:00:00", null, "岗乙", 0);
+        store.add(legacy);
+        store.add(fresh);
+        TaskDispatchResult r = service.runOnce(d("2026-10-06 03:00:00"));
+        assertEquals(2, r.getPicked());
+        assertEquals(1, r.getSent());
+        assertEquals(1, r.getFailed());
+        assertEquals(2, find(1L).getStatus().intValue());
+        assertEquals("发不成：行上没落着人名，不知发给谁", find(1L).getRemark());
         assertEquals(1, find(2L).getStatus().intValue());
     }
 

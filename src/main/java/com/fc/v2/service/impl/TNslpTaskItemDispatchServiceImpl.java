@@ -68,11 +68,13 @@ public class TNslpTaskItemDispatchServiceImpl implements ITNslpTaskItemDispatchS
             return TaskDispatchResult.of(0, 0, 0);
         }
 
-        // 只挑还搁着的行：记为已发出的、记为发不成的，都不要再碰
+        // 只挑还搁着的行：情形格空着的存量行也算搁着（老系统搬来没填这一格）；
+        // 记为已发出的、记为发不成的，都不要再碰。挑单与下面两处落记号用同一条「仍搁着」取法。
         List<TNslpTaskItem> waiting = this.nslpTaskItemMapper.selectList(
                 new QueryWrapper<TNslpTaskItem>()
-                        .eq("status", TaskDispatchRules.STATUS_WAIT)
-                        .eq("del_flag", 0));
+                        .eq("del_flag", 0)
+                        .and(w -> w.eq("status", TaskDispatchRules.STATUS_WAIT)
+                                .or().isNull("status")));
         // 届不届期只照口径那一条取法；某行归哪段只认本行写的，别去邻行借
         List<TNslpTaskItem> eligible = new ArrayList<TNslpTaskItem>();
         for (TNslpTaskItem r : waiting) {
@@ -131,10 +133,7 @@ public class TNslpTaskItemDispatchServiceImpl implements ITNslpTaskItemDispatchS
         if (recipient == null) {
             throw new IllegalStateException("行上没落着人名，不知发给谁");
         }
-        UpdateWrapper<TNslpTaskItem> uw = new UpdateWrapper<TNslpTaskItem>();
-        uw.eq("id", row.getId())
-                .eq("status", TaskDispatchRules.STATUS_WAIT)
-                .eq("del_flag", 0);
+        UpdateWrapper<TNslpTaskItem> uw = waitingGuard(row.getId());
         uw.set("status", TaskDispatchRules.STATUS_DONE)
                 .set("content", TaskDispatchRules.appendSendNote(row.getContent(), at, recipient))
                 .set("update_by", TaskDispatchRules.ACTOR)
@@ -150,10 +149,7 @@ public class TNslpTaskItemDispatchServiceImpl implements ITNslpTaskItemDispatchS
     private void markFailed(TNslpTaskItem row, Date at, Exception e) {
         String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
         try {
-            UpdateWrapper<TNslpTaskItem> uw = new UpdateWrapper<TNslpTaskItem>();
-            uw.eq("id", row.getId())
-                    .eq("status", TaskDispatchRules.STATUS_WAIT)
-                    .eq("del_flag", 0);
+            UpdateWrapper<TNslpTaskItem> uw = waitingGuard(row.getId());
             uw.set("status", TaskDispatchRules.STATUS_FAIL)
                     .set("remark", TaskDispatchRules.failNote(reason))
                     .set("update_by", TaskDispatchRules.ACTOR)
@@ -162,5 +158,18 @@ public class TNslpTaskItemDispatchServiceImpl implements ITNslpTaskItemDispatchS
         } catch (Exception ex) {
             log.warn("安排单这一行标发不成也落了空，行照旧搁着留待下趟：id={}", row.getId(), ex);
         }
+    }
+
+    /**
+     * 「仍搁着」条件，挑单与两处落记号共用这一条：情形显式落搁着、或空着（老系统搬来的
+     * 存量行没填这一格），且删除标记正常。条件更新只咬得着仍搁着的行——同一行并着来两回，
+     * 记号只落得成一回（幂等）；空着的行成过一回后情形变已发出，第二回再也咬不着。
+     */
+    private UpdateWrapper<TNslpTaskItem> waitingGuard(Long id) {
+        UpdateWrapper<TNslpTaskItem> uw = new UpdateWrapper<TNslpTaskItem>();
+        uw.eq("id", id)
+                .eq("del_flag", 0)
+                .and(w -> w.eq("status", TaskDispatchRules.STATUS_WAIT).or().isNull("status"));
+        return uw;
     }
 }

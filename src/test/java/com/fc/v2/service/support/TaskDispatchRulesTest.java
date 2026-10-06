@@ -109,10 +109,28 @@ public class TaskDispatchRulesTest {
         assertTrue(TaskDispatchRules.pickable(0, 0, past, null, at));
         assertFalse(TaskDispatchRules.pickable(1, 0, past, null, at));   // 已发出不再碰
         assertFalse(TaskDispatchRules.pickable(2, 0, past, null, at));   // 发不成不再碰
-        assertFalse(TaskDispatchRules.pickable(null, 0, past, null, at));
         assertFalse(TaskDispatchRules.pickable(0, 1, past, null, at));   // 已删除
         assertFalse(TaskDispatchRules.pickable(0, 0, future, null, at)); // 没届期
         assertFalse(TaskDispatchRules.pickable(0, 0, null, null, at));   // 没届期那一日
+    }
+
+    @Test
+    public void blankStatus_isTreatedAsWaiting_legacyRows() {
+        // 老系统搬来的存量行情形格常空着：空＝从没办过，与显式落 0 一样算搁着，新逻辑照收
+        assertTrue(TaskDispatchRules.isWaiting(null));
+        assertTrue(TaskDispatchRules.isWaiting(Integer.valueOf(TaskDispatchRules.STATUS_WAIT)));
+        assertFalse(TaskDispatchRules.isWaiting(Integer.valueOf(TaskDispatchRules.STATUS_DONE)));
+        assertFalse(TaskDispatchRules.isWaiting(Integer.valueOf(TaskDispatchRules.STATUS_FAIL)));
+
+        Date at = d("2026-10-06 03:00:00");
+        Date past = d("2026-10-01 00:00:00");
+        // 空情形 + 已届期：挑得中（这正是老系统迁来、该今天发的复测条目）
+        assertTrue(TaskDispatchRules.pickable(null, 0, past, null, at));
+        // 空情形但已删除：不挑
+        assertFalse(TaskDispatchRules.pickable(null, 1, past, null, at));
+        // 空情形但没届期：不挑
+        assertFalse(TaskDispatchRules.pickable(null, 0,
+                d("2026-12-01 00:00:00"), null, at));
     }
 
     // ------------------------------------------------------------------
